@@ -44,6 +44,7 @@ class TrajModel(object):
     self.debug_tensors = {} # add any tensor you want to evaluate for debugging and just run `speed_benchmark()`
     self.model_scope = model_scope
     self.loss_dict = {}
+    self.pred = {}
     self.data = data
     self.train_phase = train_phase
     self.config = config
@@ -122,7 +123,7 @@ class TrajModel(object):
           self.dest_emb_ = self.dest_coord_
         dest_inputs_ = tf.tile(tf.expand_dims(tf.nn.embedding_lookup(self.dest_emb_, dest_label_), 1), [1, self.max_t_, 1])  # [batch, t, dest_emb]
 
-        inputs_ = tf.concat(2, [emb_inputs_, dest_inputs_], "input_with_dest")
+        inputs_ = tf.concat([emb_inputs_, dest_inputs_], 2, "input_with_dest")
       else:
         inputs_ = emb_inputs_
       return inputs_
@@ -157,7 +158,7 @@ class TrajModel(object):
     def bidirectional_rnn(cell, emb_inputs_, initial_state_, seq_len_):
       rnn_outputs_, output_states = tf.nn.bidirectional_dynamic_rnn(cell, cell, emb_inputs_, seq_len_,
                                                                     initial_state_, initial_state_, config.float_type)
-      return tf.concat(2, rnn_outputs_)
+      return tf.concat(rnn_outputs_, 2)
     def rnn(cell, emb_inputs_, initial_state_, seq_len_):
       if not config.fix_seq_len:
         raise Exception("`config.fix_seq_len` should be set to `True` if using rnn()")
@@ -168,7 +169,7 @@ class TrajModel(object):
     if config.rnn == 'rnn':
       cell = tf.nn.rnn_cell.BasicRNNCell(config.hidden_dim)
     elif config.rnn == 'lstm':
-      cell = tf.nn.rnn_cell.BasicLSTMCell(config.hidden_dim)
+      cell = tf.nn.rnn_cell.LSTMCell(config.hidden_dim)
     elif config.rnn == 'gru':
       cell = tf.nn.rnn_cell.GRUCell(config.hidden_dim)
     else:
@@ -217,7 +218,7 @@ class TrajModel(object):
       logits_p_ = tf.matmul(outputs_flat_, wp_) + bp_  # [batch*t, state_size]
       loss_p_vec_ = tf.nn.sparse_softmax_cross_entropy_with_logits(logits_p_, targets_p_flat_)  # [batch*t]
 
-      masked_loss_p_ = tf.mul(loss_p_vec_, tf.reshape(self.mask_, [-1]))  # [batch*t]
+      masked_loss_p_ = tf.multiply(loss_p_vec_, tf.reshape(self.mask_, [-1]))  # [batch*t]
       loss_p_ = tf.reduce_sum(masked_loss_p_) / config.batch_size
 
       max_prediction_label_ = tf.cast(tf.argmax(logits_p_, dimension=1), config.int_type) # [batch*t], int64->int32
@@ -241,7 +242,10 @@ class TrajModel(object):
       # hidden to output
       logits_p_ = tf.matmul(outputs_flat_, wp_) + bp_  # [batch*t, state_size]
       self.logits_mask__ = tf.sparse_placeholder(tf.float32, name="logits_mask")  # "__" to indicate a sparse tensor
-      logits_p_constrained__ = tf.sparse_softmax(self.logits_mask__ * logits_p_)  # [batch*t, state_size], sparse
+      logits_p_constrained__ = tf.sparse.softmax(self.logits_mask__ * logits_p_)  # [batch*t, state_size], sparse
+
+      next_state = tf.sparse.to_dense(tf.sparse.reorder(logits_p_constrained__))
+      self.pred['output'] = tf.cast(tf.argmax(next_state, dimension=1), config.int_type)
 
       # construct one-hot targets
       targets_p_flat_ = tf.reshape(self.targets_, [-1])  # [batch*t]
@@ -249,8 +253,8 @@ class TrajModel(object):
                                    dtype=config.float_type)  # [batch*t, state_size]
 
       xent__ = logits_p_constrained__ * onehot_targets_  # [batch*t, state_size], sparse
-      loss_p_vec_ = -tf.log(tf.sparse_reduce_sum(xent__, 1))  # [batch*t]
-      masked_loss_p_ = tf.mul(loss_p_vec_, tf.reshape(self.mask_, [-1]))  # [batch*t]
+      loss_p_vec_ = -tf.math.log(tf.sparse_reduce_sum(xent__, 1))  # [batch*t]
+      masked_loss_p_ = tf.multiply(loss_p_vec_, tf.reshape(self.mask_, [-1]))  # [batch*t]
       loss_p_ = tf.reduce_sum(masked_loss_p_) / config.batch_size
 
       return loss_p_
@@ -286,7 +290,7 @@ class TrajModel(object):
         sub_adj_mask_ = tf.nn.embedding_lookup(adj_mask_, input_flat_)  # [batch*t, max_adj_num]
 
         # first column is target_
-        target_and_sub_adj_mat_ = tf.concat(1, [target_flat_, sub_adj_mat_])  # [batch*t, max_adj_num+1]
+        target_and_sub_adj_mat_ = tf.concat([target_flat_, sub_adj_mat_], 1)  # [batch*t, max_adj_num+1]
 
         outputs_3d_ = tf.expand_dims(outputs_, 1)  # [batch*t, hid_dim] -> [batch*t, 1, hid_dim]
 
@@ -297,35 +301,31 @@ class TrajModel(object):
         outputs_tiled_ = tf.tile(outputs_3d_, [1, tf.shape(adj_mat_)[1] + 1, 1])  # [batch*t, max+adj_num+1, hid_dim]
         outputs_tiled_ = tf.reshape(outputs_tiled_,
                                     [-1, int(outputs_tiled_.get_shape()[2])])  # [batch*t*max_adj_num+1, hid_dim]
-        target_logit_and_sub_logits_ = tf.reshape(tf.reduce_sum(tf.mul(sub_w_flat_, outputs_tiled_), 1),
-                                                  [-1, tf.shape(adj_mat_)[1] + 1])  # [batch*t, max_adj_num+1]
+        target_logit_and_sub_logits_ = tf.reshape(tf.reduce_sum(tf.multiply(sub_w_flat_, outputs_tiled_), 1), [-1, tf.shape(adj_mat_)[1] + 1])  # [batch*t, max_adj_num+1]
 
         # for numerical stability
         scales_ = tf.reduce_max(target_logit_and_sub_logits_, 1)  # [batch*t]
         scaled_target_logit_and_sub_logits_ = tf.transpose(
-          tf.sub(tf.transpose(target_logit_and_sub_logits_),
+          tf.subtract(tf.transpose(target_logit_and_sub_logits_),
                  scales_))  # transpose for broadcasting [batch*t, max_adj_num+1]
 
         scaled_sub_logits_ = scaled_target_logit_and_sub_logits_[:, 1:]  # [batch*t, max_adj_num]
         exp_scaled_sub_logits_ = tf.exp(scaled_sub_logits_)  # [batch*t, max_adj_num]
-        deno_ = tf.reduce_sum(tf.mul(exp_scaled_sub_logits_, sub_adj_mask_), 1)  # [batch*t]
+        deno_ = tf.reduce_sum(tf.multiply(exp_scaled_sub_logits_, sub_adj_mask_), 1)  # [batch*t]
         log_deno_ = tf.log(deno_)  # [batch*t]
         log_nume_ = tf.reshape(scaled_target_logit_and_sub_logits_[:, 0:1], [-1])  # [batch*t]
-        loss_ = tf.sub(log_deno_, log_nume_)  # [batch*t] since loss is -sum(log(softmax))
+        loss_ = tf.subtract(log_deno_, log_nume_)  # [batch*t] since loss is -sum(log(softmax))
 
         max_prediction_ = tf.one_hot(tf.argmax(exp_scaled_sub_logits_ * sub_adj_mask_, 1),
                                      int(adj_mat_.get_shape()[1]), dtype=config.float_type)  # [batch*t, max_adj_num]
         return loss_, max_prediction_
 
       wp_t_ = tf.transpose(wp_)  # [state_size, hid_dim]
-      loss_p_vec_, max_prediction_ = constrained_softmax_cross_entropy_loss(outputs_flat_, self.inputs_,
-                                                            self.targets_, wp_t_, bp_,
-                                                            self.adj_mat_, self.adj_mask_)  # [batch*t]
-      self.build_max_predict_loss_layer(max_prediction_,
-                                        tf.reshape(self.sub_onehot_targets_,
-                                             [-1, int(self.sub_onehot_targets_.get_shape()[2])]),
-                                        use_onehot=True)
-      masked_loss_p_ = tf.mul(loss_p_vec_, tf.reshape(self.mask_, [-1]))  # [batch*t]
+      loss_p_vec_, max_prediction_ = constrained_softmax_cross_entropy_loss(outputs_flat_, self.inputs_, self.targets_, wp_t_, bp_, self.adj_mat_, self.adj_mask_)  # [batch*t]
+
+      self.build_max_predict_loss_layer(max_prediction_, tf.reshape(self.sub_onehot_targets_, [-1, int(self.sub_onehot_targets_.get_shape()[2])]), use_onehot=True)
+      # self.pred["next_state"] = max_prediction_
+      masked_loss_p_ = tf.multiply(loss_p_vec_, tf.reshape(self.mask_, [-1]))  # [batch*t]
       loss_p_ = tf.reduce_sum(masked_loss_p_) / config.batch_size
       return loss_p_
 
@@ -430,9 +430,7 @@ class TrajModel(object):
       all_b_task_ = self.all_b_task_
 
       # compute loss
-      def constrained_softmax_cross_entropy_loss_with_individual_weights(inputs_, lpi_,
-                                                                         sub_onehot_targets_, seq_mask_,
-                                                                         all_w_task_, all_b_task_, adj_mask_):
+      def constrained_softmax_cross_entropy_loss_with_individual_weights(inputs_, lpi_,sub_onehot_targets_, seq_mask_, all_w_task_, all_b_task_, adj_mask_):
         """
         A fast strategy to compute the x-ent loss for LPIRNN model. The main idea is similar to the speed-up strategy
         in CSSRNN introduced in the paper. Thus we do not include this stuff in the paper. For more details, just read
@@ -460,38 +458,28 @@ class TrajModel(object):
         sub_b_ = tf.nn.embedding_lookup(all_b_task_, inputs_flat_)  # [batch*t, max_adj_num]
 
         encoders_tiled_ = tf.tile(encoders_3d_, [1, int(adj_mask_.get_shape()[1]), 1])  # [batch*t, max_adj_num, dir]
-        logits_ = tf.reduce_sum(tf.mul(sub_w_, encoders_tiled_), 2) + sub_b_  # [batch*t, max_adj_num]
+        logits_ = tf.reduce_sum(tf.multiply(sub_w_, encoders_tiled_), 2) + sub_b_  # [batch*t, max_adj_num]
 
         # for numerical stability
         scales_ = tf.reduce_max(logits_, 1)  # [batch*t]
         scaled_logits = tf.transpose(
-          tf.sub(tf.transpose(logits_), scales_))  # transpose for broadcasting [batch*t, max_adj_num]
+          tf.subtract(tf.transpose(logits_), scales_))  # transpose for broadcasting [batch*t, max_adj_num]
         exp_scaled_logits_ = tf.exp(scaled_logits)  # [batch*t, max_adj_num]
-        normalizations_ = tf.reduce_sum(tf.mul(exp_scaled_logits_, sub_adj_mask_), 1)  # [batch*t]
+        normalizations_ = tf.reduce_sum(tf.multiply(exp_scaled_logits_, sub_adj_mask_), 1)  # [batch*t]
         log_probs_ = tf.transpose(tf.transpose(scaled_logits) - tf.log(normalizations_))  # [batch*t, max_adj_num]
 
-        sub_onehot_targets_flat = tf.reshape(sub_onehot_targets_,
-                                             [-1, int(sub_onehot_targets_.get_shape()[2])])  # [batch*t, max_adj_num]
+        sub_onehot_targets_flat = tf.reshape(sub_onehot_targets_, [-1, int(sub_onehot_targets_.get_shape()[2])])  # [batch*t, max_adj_num]
 
         xent_ = - tf.reduce_sum(sub_onehot_targets_flat * log_probs_, 1) * tf.reshape(seq_mask_, [-1])  # [batch*t]
 
         # max prediction acc computation
-        max_prediction_ = tf.one_hot(tf.argmax(tf.exp(log_probs_) * sub_adj_mask_, dimension=1),
-                                     int(adj_mask_.get_shape()[1]),
-                                     dtype=config.float_type)  # [batch*t, max_adj_num]
+        max_prediction_ = tf.one_hot(tf.argmax(tf.exp(log_probs_) * sub_adj_mask_, dimension=1), int(adj_mask_.get_shape()[1]), dtype=config.float_type)  # [batch*t, max_adj_num]
 
         return xent_, max_prediction_
 
-      xent_, max_prediction_ = constrained_softmax_cross_entropy_loss_with_individual_weights(self.inputs_,
-                                                                                              lpi_,
-                                                                                              self.sub_onehot_targets_,
-                                                                                              self.mask_,
-                                                                                              all_w_task_, all_b_task_,
-                                                                                              self.adj_mask_)
-      self.build_max_predict_loss_layer(max_prediction_,
-                                        tf.reshape(self.sub_onehot_targets_,
-                                             [-1, int(self.sub_onehot_targets_.get_shape()[2])]),
-                                        use_onehot=True)
+      xent_, max_prediction_ = constrained_softmax_cross_entropy_loss_with_individual_weights(self.inputs_, lpi_, self.sub_onehot_targets_, self.mask_, all_w_task_, all_b_task_, self.adj_mask_)
+
+      self.build_max_predict_loss_layer(max_prediction_, tf.reshape(self.sub_onehot_targets_, [-1, int(self.sub_onehot_targets_.get_shape()[2])]), use_onehot=True)
       loss_p_ = tf.reduce_sum(xent_) / config.batch_size
       if config.individual_task_regularizer > 0 and train_phase:
         if config.individual_task_keep_prob < 1.0:
@@ -513,10 +501,10 @@ class TrajModel(object):
     # compute grads and update params
     self.build_trainer(self.loss_dict["loss"], tf.trainable_variables())
     if config.use_v2_saver:
-      self.saver = tf.train.Saver(tf.all_variables(), max_to_keep=config.max_ckpt_to_keep,
+      self.saver = tf.train.Saver(tf.global_variables(), max_to_keep=config.max_ckpt_to_keep,
                                   write_version=saver_pb2.SaverDef.V2)
     else:
-      self.saver = tf.train.Saver(tf.all_variables(), max_to_keep=config.max_ckpt_to_keep,
+      self.saver = tf.train.Saver(tf.global_variables(), max_to_keep=config.max_ckpt_to_keep,
                                   write_version=saver_pb2.SaverDef.V1)
 
   def build_RNNLM_model(self, train_phase):
@@ -537,7 +525,7 @@ class TrajModel(object):
     outputs_flat_ = tf.reshape(rnn_outputs_, [-1, int(rnn_outputs_.get_shape()[2])])  # [batch*t, hid_dim]
 
     if config.model_type == "CSSRNN":
-      self.build_xent_loss_layer(outputs_flat_, True, 'adjmat_adjmask', False) # the default settings of CSSRNN
+      self.build_xent_loss_layer(outputs_flat_, True, config.constrained_softmax_strategy, False) # the default settings of CSSRNN
     elif config.model_type == "RNN":
       self.build_xent_loss_layer(outputs_flat_, use_constrained_softmax=False)
     elif config.model_type == "SPECIFIED_CSSRNN":
@@ -554,10 +542,10 @@ class TrajModel(object):
     # compute grads and update params
     self.build_trainer(self.loss_dict["loss"], tf.trainable_variables())
     if config.use_v2_saver:
-      self.saver = tf.train.Saver(tf.all_variables(), max_to_keep=config.max_ckpt_to_keep,
+      self.saver = tf.train.Saver(tf.global_variables(), max_to_keep=config.max_ckpt_to_keep,
                                   write_version=saver_pb2.SaverDef.V2)
     else:
-      self.saver = tf.train.Saver(tf.all_variables(), max_to_keep=config.max_ckpt_to_keep,
+      self.saver = tf.train.Saver(tf.global_variables(), max_to_keep=config.max_ckpt_to_keep,
                                   write_version=saver_pb2.SaverDef.V1)
 
   def build_trainer(self, object_loss_, params_to_train):
@@ -878,13 +866,13 @@ class TrajModel(object):
           print(loss_dict["_sub_onehot_targets_flat"][i])
           print(loss_dict["_max_prediction"][i])
           print(loss_dict["_seq_mask"][i])
-          raw_input()
+          # input()
 
         for k in self.debug_tensors.keys():
           debug_val = loss_dict["_"+k]
           print(k +".shape = " + str(debug_val.shape))
           print(debug_val)
-          input()
+          # input()
 
     t2 = time.time()
     samples_per_sec = steps_for_test * self.config.batch_size / float(t2 - t1)
@@ -892,6 +880,14 @@ class TrajModel(object):
     print("%d samples per sec, %.4f ms per sample, batch_size = %d" % (
     samples_per_sec, ms_per_sample, self.config.batch_size))
     print("benchmark loss = %.5f" % (loss / steps_for_test))
+
+  def predict(self, sess, data):
+    batch = self.get_batch(data, self.config.batch_size, self.config.max_seq_len)
+    feed_dict = self.feed(batch)
+    fetch_dict = self.pred
+    # run sess
+    vals = sess.run(fetch_dict, feed_dict, options=self.config.run_options, run_metadata=self.config.run_metadata)
+    return vals
 
   def train_epoch(self, sess, data):
     config = self.config
@@ -1003,8 +999,7 @@ class TrajModel(object):
       name = 'test'
     print(name +" set:", end='')
     if self.config.compute_ppl:
-      print("| ppl = %.3f" % math.exp(float(cumulative_losses[self.config.loss_for_filename] / batch_counter)),
-            end='')
+      print("| ppl = %.3f" % math.exp(float(cumulative_losses[self.config.loss_for_filename] / batch_counter)), end='')
     for (k, v) in cumulative_losses.items():
       print("| %s = %.4f" % (k, v / batch_counter), end='')
     print("")
@@ -1033,3 +1028,9 @@ class TrajModel(object):
         self.config.log_file = open(self.config.log_filename, "a+")
         sys.stdout = self.config.log_file
     print("")
+    valid_losses = {}
+    for (k,v) in cumulative_losses.items():
+      if k[0] == '_' or k[0] == '~':
+        continue
+      valid_losses[k] = v / batch_counter
+    return valid_losses

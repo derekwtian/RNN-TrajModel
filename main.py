@@ -50,6 +50,8 @@ class Config(object):
   dataset_path = None # do not set this manually
   workspace = '/data' # the true workspace will actually be workspace + '/' + dataset_name
   file_name = "example.txt"
+  train_filename = "example.txt"
+  test_filename = "example.txt"
   data_size = -1 # how many trajs you want to read in. `-1` means reading in all trajectories
   dataset_ratio = [0.8, 0.1, 0.1]
   state_size = None # do not set this manually
@@ -101,7 +103,7 @@ class Config(object):
   build_unconstrained_in_train = False # have effects only when the model_type is `SPECIFIED_CSSRNN`
   use_constrained_softmax_in_test = True # have effects only when the model_type is `SPECIFIED_CSSRNN`
   build_unconstrained_in_test = False # have effects only when the model_type is `SPECIFIED_CSSRNN`
-  constrained_softmax_strategy = 'adjmat_adjmask' # suggested  # 'sparse_tensor' or 'adjmat_adjmask'
+  constrained_softmax_strategy = 'sparse_tensor' # suggested  # 'sparse_tensor' or 'adjmat_adjmask'
 
   input_dest = True # if `True`, append the destination feature on the input feature
   dest_emb = True # if `True`, use the distributed representation to represent the destination states
@@ -152,6 +154,8 @@ class Config(object):
     # set workspace
     self.workspace = os.path.join(self.workspace, self.dataset_name)
     self.dataset_path = os.path.join(self.workspace, self.file_name)
+    self.train_path = os.path.join(self.workspace, self.train_filename)
+    self.test_path = os.path.join(self.workspace, self.test_filename)
     self.map_path = os.path.join(self.workspace, "map/")
     self.__set_save_path()
     if self.eval_mode and self.save_ckpt:
@@ -187,6 +191,7 @@ class Config(object):
               individual_task_keep_prob = self.individual_task_keep_prob))
 
     print("\ntraining params:\n" \
+          "\tepoch = {epoch_num}\n" \
           "\tbatch = {batch_size}\n" \
           "\tlr = {lr}\n" \
           "\tlr_decay = {lr_decay}\n" \
@@ -197,7 +202,7 @@ class Config(object):
           "\tuse_seq_len_in_rnn = {use_seq_len_in_rnn}\n" \
           "\tmax_seq_len = {max_seq_len}\n" \
           "\toptimizer = {opt}" \
-      .format(batch_size=self.batch_size, lr=self.lr, lr_decay=self.lr_decay, keep_prob=self.keep_prob,
+      .format(epoch_num=self.epoch_count, batch_size=self.batch_size, lr=self.lr, lr_decay=self.lr_decay, keep_prob=self.keep_prob,
               max_grad_norm=self.max_grad_norm, init_scale=self.init_scale,
               fix_seq_len=self.fix_seq_len, max_seq_len=self.max_seq_len,
               use_seq_len_in_rnn=self.use_seq_len_in_rnn, opt=self.opt))
@@ -229,7 +234,7 @@ class Config(object):
     # Here I use `0` to be the `PAD_ID`, and the road 0 is also a valid road in the road network
     # which means it has an adjacent state (i.e., roadnet.edges[config.PAD_ID].adjList_ids[0]),
     # And since there is no historical trajectory that passes road 0, I decide to leverage it.
-    self.TARGET_PAD_ID = roadnet.edges[config.PAD_ID].adjList_ids[0]
+    self.TARGET_PAD_ID = roadnet.edges[self.PAD_ID].adjList_ids[0]
 
   def load(self, config_path):
     """
@@ -287,37 +292,37 @@ class Config(object):
     self.PAD_ID = int(self.PAD_ID)
 
     self.max_ckpt_to_keep = int(self.max_ckpt_to_keep)
-    if isinstance(self.load_ckpt, basestring):
+    if isinstance(self.load_ckpt, str):
       self.load_ckpt = bool(du.strtobool(self.load_ckpt))
-    if isinstance(self.save_ckpt, basestring):
+    if isinstance(self.save_ckpt, str):
       self.save_ckpt = bool(du.strtobool(self.save_ckpt))
-    if isinstance(self.compute_ppl, basestring):
+    if isinstance(self.compute_ppl, str):
       self.compute_ppl = bool(du.strtobool(self.compute_ppl))
-    if isinstance(self.direct_stdout_to_file, basestring):
+    if isinstance(self.direct_stdout_to_file, str):
       self.direct_stdout_to_file = bool(du.strtobool(self.direct_stdout_to_file))
     self.samples_per_epoch_in_train = int(self.samples_per_epoch_in_train)
-    if isinstance(self.use_v2_saver, basestring):
+    if isinstance(self.use_v2_saver, str):
       self.use_v2_saver = bool(du.strtobool(self.use_v2_saver))
 
     self.hidden_dim = int(self.hidden_dim)
     self.emb_dim = int(self.emb_dim)
     self.num_layers = int(self.num_layers)
-    if isinstance(self.use_bidir_rnn, basestring):
+    if isinstance(self.use_bidir_rnn, str):
       self.use_bidir_rnn = bool(du.strtobool(self.use_bidir_rnn))
-    if isinstance(self.eval_mode, basestring):
+    if isinstance(self.eval_mode, str):
       self.eval_mode = bool(du.strtobool(self.eval_mode))
 
-    if isinstance(self.use_constrained_softmax_in_train, basestring):
+    if isinstance(self.use_constrained_softmax_in_train, str):
       self.use_constrained_softmax_in_train = bool(du.strtobool(self.use_constrained_softmax_in_train))
-    if isinstance(self.build_unconstrained_in_train, basestring):
+    if isinstance(self.build_unconstrained_in_train, str):
       self.build_unconstrained_in_train = bool(du.strtobool(self.build_unconstrained_in_train))
-    if isinstance(self.use_constrained_softmax_in_test, basestring):
+    if isinstance(self.use_constrained_softmax_in_test, str):
       self.use_constrained_softmax_in_test = bool(du.strtobool(self.use_constrained_softmax_in_test))
-    if isinstance(self.build_unconstrained_in_test, basestring):
+    if isinstance(self.build_unconstrained_in_test, str):
       self.build_unconstrained_in_test = bool(du.strtobool(self.build_unconstrained_in_test))
-    if isinstance(self.input_dest, basestring):
+    if isinstance(self.input_dest, str):
       self.input_dest = bool(du.strtobool(self.input_dest))
-    if isinstance(self.dest_emb, basestring):
+    if isinstance(self.dest_emb, str):
       self.dest_emb = bool(du.strtobool(self.dest_emb))
 
     self.lpi_dim = int(self.lpi_dim)
@@ -330,19 +335,19 @@ class Config(object):
     self.keep_prob = float(self.keep_prob)
     self.max_grad_norm = float(self.max_grad_norm)
     self.init_scale = float(self.init_scale)
-    if isinstance(self.fix_seq_len, basestring):
+    if isinstance(self.fix_seq_len, str):
       self.fix_seq_len =bool(du.strtobool(self.fix_seq_len))
-    if isinstance(self.use_seq_len_in_rnn, basestring):
+    if isinstance(self.use_seq_len_in_rnn, str):
       self.use_seq_len_in_rnn = bool(du.strtobool(self.use_seq_len_in_rnn))
     self.max_seq_len = int(self.max_seq_len)
 
     self.epoch_count = int(self.epoch_count)
     self.samples_for_benchmark = int(self.samples_for_benchmark)
 
-    if isinstance(self.eval_ngram_model, basestring):
+    if isinstance(self.eval_ngram_model, str):
       self.eval_ngram_model = bool(du.strtobool(self.eval_ngram_model))
 
-    if isinstance(self.trace_hid_layer, basestring):
+    if isinstance(self.trace_hid_layer, str):
       self.trace_hid_layer = bool(du.strtobool(self.trace_hid_layer))
     self.trace_input_id = int(self.trace_input_id)
 
@@ -429,7 +434,47 @@ def read_data(file_path, max_count=-1, max_seq_len = None, ratio=[0.8, 0.1, 0.1]
   return routes, train, valid, test
 
 
+def read_data2(train_path, test_path, max_count=-1, max_seq_len = None):
+  """
+  Read in the route data
+  data format: one traj one line with delimiter as ','
+  :param file_path: path of the file to load
+  :param max_count: maximum count of routes to be loaded, default is -1 which loads all routes.
+  :param max_seq_len: samples longer than `max_seq_len` will be skipped.
+  :param ratio: ratio[train, valid, test] for split the dataset, automatically normalized if sum(ratio) is not 1.
+  :return: three lists of lists, in the order: train, valid, test.
+  """
+  train = []
+  current_count = 0
+  with open(train_path) as file:
+    for line in file:
+      if current_count == max_count:
+        break
+      route_str = line.split(',')
+      if len(route_str) > max_seq_len or len(route_str) < 2:
+        continue
+      train.append([int(route_str[i]) for i in range(len(route_str))])
+      current_count += 1
+
+  test = []
+  current_count = 0
+  with open(test_path) as file:
+    for line in file:
+      if current_count == max_count:
+        break
+      route_str = line.split(',')
+      if len(route_str) > max_seq_len or len(route_str) < 2:
+        continue
+      test.append([int(route_str[i]) for i in range(len(route_str))])
+      current_count += 1
+
+  valid = test
+  routes = train + valid + test
+  return routes, train, valid, test
+
+
 if __name__ == "__main__":
+  # os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
   config = Config("config")
   # set log file
   timestr = time.strftime('%Y-%m-%d_%H:%M:%S', time.localtime(time.time())) # use for naming the log file
@@ -440,17 +485,18 @@ if __name__ == "__main__":
     sys.stdout = config.log_file
 
   # process data
-  routes, train, valid, test = read_data(config.dataset_path, config.data_size, config.max_seq_len, config.dataset_ratio)
+  # routes, train, valid, test = read_data(config.dataset_path, config.data_size, config.max_seq_len, config.dataset_ratio)
+  routes, train, valid, test = read_data2(config.train_path, config.test_path, config.data_size, config.max_seq_len)
   print("successfully read %d routes" % sum([len(train), len(valid), len(test)]))
+  print("train:%d, valid:%d, test:%d" % (len(train), len(valid), len(test)))
   max_edge_id = max([max(route) for route in routes])
   min_edge_id = min([max(route) for route in routes])
   print("min_edge_id = %d, max_edge_id = %d" % (min_edge_id, max_edge_id))
-  max_route_len = max([len(route) for route in routes])
-  route_lens = [len(route) for route in routes]
-  print("train:%d, valid:%d, test:%d" % (len(train), len(valid), len(test)))
-  print(max(route_lens))
-  plt.hist(route_lens, bins=config.max_seq_len, cumulative=True, normed=True)
-  plt.show()
+  # max_route_len = max([len(route) for route in routes])
+  # route_lens = [len(route) for route in routes]
+  # print(max(route_lens))
+  # plt.hist(route_lens, bins=config.max_seq_len, cumulative=True, normed=True)
+  # plt.show()
 
   def count_trans(roadnet, data):
     # initialization
@@ -508,7 +554,6 @@ if __name__ == "__main__":
     # markov_model.train_and_eval_given_dest(train, valid, 2, 10, use_fast=True) # 40k
     # markov_model.train_and_eval_given_dest(train, valid, 4, 300) # 40k
     # markov_model.train_and_eval_given_dest(train, valid, 3, 10, True) # 6K
-    input()
 
   # construct model
   with tf.Graph().as_default():
@@ -530,16 +575,15 @@ if __name__ == "__main__":
     # with sv.managed_session() as sess:
     sess_config = tf.ConfigProto()
     # sess_config.gpu_options.per_process_gpu_memory_fraction = 0.4
-    # sess_config.gpu_options.allow_growth = True
+    sess_config.gpu_options.allow_growth = True
     with tf.Session(config=sess_config) as sess:
+      writer = tf.summary.FileWriter(os.path.join(config.workspace, "summary"), sess.graph)
       # stuff for ckpt
       ckpt_path = None
       if config.load_ckpt:
         print('Input training ckpt filename (at %s): ' % config.load_path)
         if PY3:
           ckpt_name = input()
-        else:
-          ckpt_name = raw_input()
         print(ckpt_name)
         ckpt_path = os.path.join(config.load_path, ckpt_name)
         print('try loading ' + ckpt_path)
@@ -550,27 +594,25 @@ if __name__ == "__main__":
         if config.load_ckpt:
           print("restore model params failed")
         print("initialize all variables...")
-        sess.run(tf.initialize_all_variables())
+        sess.run(tf.global_variables_initializer())
 
       # benchmark for testing speed
-      print("speed benchmark for get_batch()...")
-      how_many_tests = 1000
-      t1 = time.time()
-      for _ in range(how_many_tests):
-        model.get_batch(model.data, config.batch_size, config.max_seq_len)
-      t2 = time.time()
-      print("%.4f ms per batch, %.4fms per sample, batch_size = %d" % (float(t2-t1)/how_many_tests*1000.0,
-                                                                     float(t2-t1)/how_many_tests/config.batch_size*1000.0,
-                                                                     config.batch_size))
-
-      # use for timeline trace (unstable, need lots of memory)
-      run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-      run_metadata = tf.RunMetadata()
-
-      print('start benchmarking...')
-      model.speed_benchmark(sess, config.samples_for_benchmark)
-      # timeline generation
-      model_valid.speed_benchmark(sess, config.samples_for_benchmark)
+      # print("speed benchmark for get_batch()...")
+      # how_many_tests = 1000
+      # t1 = time.time()
+      # for _ in range(how_many_tests):
+      #   model.get_batch(model.data, config.batch_size, config.max_seq_len)
+      # t2 = time.time()
+      # print("%.4f ms per batch, %.4fms per sample, batch_size = %d" % (float(t2-t1)/how_many_tests*1000.0, float(t2-t1)/how_many_tests/config.batch_size*1000.0,config.batch_size))
+      #
+      # # use for timeline trace (unstable, need lots of memory)
+      # run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+      # run_metadata = tf.RunMetadata()
+      #
+      # print('start benchmarking...')
+      # model.speed_benchmark(sess, config.samples_for_benchmark)
+      # # timeline generation
+      # model_valid.speed_benchmark(sess, config.samples_for_benchmark)
       print("start training...")
 
       if config.direct_stdout_to_file:
@@ -578,10 +620,34 @@ if __name__ == "__main__":
         config.log_file = open(config.log_filename, "a+")
         sys.stdout = config.log_file
 
+      # data = [test[0]]
+      # print(data)
+      # vals = model.predict(sess, data)
+
       # let's go :)
+      start_time = time.time()
+      valid_losses = {}
+      model_name = 'model.ckpt'
+      ckpt_path = os.path.join(config.save_path, model_name)
+      updated_epoch = 0
       for ep in range(config.epoch_count):
+        if (ep - updated_epoch) > 10:
+          print("==> [Info] Early Stop in Epoch {}.".format(ep))
+          break
+        print("========= Epoch: {} =========".format(ep))
         if not config.eval_mode:
           model.train_epoch(sess, train)
-        model_valid.eval(sess, valid, True, True, model_train=model)
-        model_test.eval(sess, test, False, False, model_train=model)
-  input()
+        valid_loss = model_valid.eval(sess, valid, True, True, model_train=model)
+        # save the best model
+        for k, v in valid_loss.items():
+          if valid_losses.get(k) is None:
+            valid_losses[k] = []
+          valid_losses[k] += [v]
+        if valid_loss[config.loss_for_filename] <= min(valid_losses[config.loss_for_filename]):
+          model.saver.save(sess, ckpt_path)
+          updated_epoch = ep
+          print('==> [Info] The checkpoint file has been updated.')
+
+        # model_test.eval(sess, test, False, False, model_train=model)
+      print("[Info] Model Training Finished, Use {:.3f} Seconds".format(time.time() - start_time))
+      writer.close()
