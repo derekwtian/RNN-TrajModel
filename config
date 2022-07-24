@@ -1,8 +1,9 @@
 [dataset configuration]
-dataset_name = chengdu_7d
-workspace = /Users/tianwei/data_CSS
+dataset_name = sanfran
+workspace = /home/tianwei/dataset/data_CSS
 file_name = data/train_csstraj.txt
 train_filename = data/train_csstraj.txt
+valid_filename = data/valid_csstraj.txt
 test_filename = data/test_csstraj.txt
 data_size = -1
 
@@ -33,17 +34,18 @@ individual_task_regularizer = -1
 individual_task_keep_prob = 0.9
 
 [params for training]
-batch_size = 128
+gpu_id = 0
+batch_size = 4096
 lr = 0.0001
 lr_decay = 0.9
 keep_prob = 0.9
 max_grad_norm = 1.0
 init_scale = 0.03
-max_seq_len = 80
+max_seq_len = 300
 opt = rmsprop
 
 [for epoch]
-epoch_count = 100
+epoch_count = 300
 samples_for_benchmark = 3000
 
 [misc]

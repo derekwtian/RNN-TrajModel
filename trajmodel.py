@@ -61,19 +61,19 @@ class TrajModel(object):
 
     # construct tensors
     self.dest_coord_ = tf.constant(self.dest_coord, dtype=config.float_type, name="dest_coord") # [state_size, 2]
-    self.dests_label_ = tf.placeholder(config.int_type, shape=[config.batch_size], name="dests_label")
-    self.seq_len_ = tf.placeholder(config.int_type, shape=[config.batch_size], name="seq_len")
+    self.dests_label_ = tf.placeholder(config.int_type, shape=[None], name="dests_label")
+    self.seq_len_ = tf.placeholder(config.int_type, shape=[None], name="seq_len")
     if config.fix_seq_len:
-      self.inputs_ = tf.placeholder(config.int_type, shape=[config.batch_size, config.max_seq_len], name="inputs")
-      self.mask_ = tf.placeholder(config.float_type, shape=[config.batch_size, config.max_seq_len], name="mask")
+      self.inputs_ = tf.placeholder(config.int_type, shape=[None, config.max_seq_len], name="inputs")
+      self.mask_ = tf.placeholder(config.float_type, shape=[None, config.max_seq_len], name="mask")
       self.max_t_ = config.max_seq_len
-      self.targets_ = tf.placeholder(config.int_type, shape=[config.batch_size, config.max_seq_len], name="targets")
+      self.targets_ = tf.placeholder(config.int_type, shape=[None, config.max_seq_len], name="targets")
     else:
-      self.inputs_ = tf.placeholder(config.int_type, shape=[config.batch_size, None], name="inputs")
-      self.mask_ = tf.placeholder(config.float_type, shape=[config.batch_size, None], name="mask")
+      self.inputs_ = tf.placeholder(config.int_type, shape=[None, None], name="inputs")
+      self.mask_ = tf.placeholder(config.float_type, shape=[None, None], name="mask")
       self.max_t_ = tf.shape(self.inputs_)[1]
-      self.targets_ = tf.placeholder(config.int_type, shape=[config.batch_size, None], name="targets")
-    self.sub_onehot_targets_ = tf.placeholder(config.float_type, (config.batch_size, None, self.adj_mat.shape[1]))  # [batch, t, max_adj_num]
+      self.targets_ = tf.placeholder(config.int_type, shape=[None, None], name="targets")
+    self.sub_onehot_targets_ = tf.placeholder(config.float_type, (None, None, self.adj_mat.shape[1]))  # [batch, t, max_adj_num]
 
     # build whole computation graph of the model
     if config.model_type == "CSSRNN" or config.model_type == "SPECIFIED_CSSRNN":
@@ -186,7 +186,7 @@ class TrajModel(object):
       seq_len_ = self.seq_len_
     else:
       seq_len_ = None
-    rnn_outputs_ = dynamic_rnn(cell, inputs_, initial_state_, seq_len_)  # [batch, time, hid_dim]
+    rnn_outputs_ = dynamic_rnn(cell, inputs_, None, seq_len_)  # [batch, time, hid_dim]
     return rnn_outputs_
 
   def build_xent_loss_layer(self, outputs_flat_, use_constrained_softmax=False,
@@ -219,7 +219,7 @@ class TrajModel(object):
       loss_p_vec_ = tf.nn.sparse_softmax_cross_entropy_with_logits(logits_p_, targets_p_flat_)  # [batch*t]
 
       masked_loss_p_ = tf.multiply(loss_p_vec_, tf.reshape(self.mask_, [-1]))  # [batch*t]
-      loss_p_ = tf.reduce_sum(masked_loss_p_) / config.batch_size
+      loss_p_ = tf.reduce_sum(masked_loss_p_) / self.config.batch_size
 
       max_prediction_label_ = tf.cast(tf.argmax(logits_p_, dimension=1), config.int_type) # [batch*t], int64->int32
 
@@ -244,9 +244,6 @@ class TrajModel(object):
       self.logits_mask__ = tf.sparse_placeholder(tf.float32, name="logits_mask")  # "__" to indicate a sparse tensor
       logits_p_constrained__ = tf.sparse.softmax(self.logits_mask__ * logits_p_)  # [batch*t, state_size], sparse
 
-      next_state = tf.sparse.to_dense(tf.sparse.reorder(logits_p_constrained__))
-      self.pred['output'] = tf.cast(tf.argmax(next_state, dimension=1), config.int_type)
-
       # construct one-hot targets
       targets_p_flat_ = tf.reshape(self.targets_, [-1])  # [batch*t]
       onehot_targets_ = tf.one_hot(targets_p_flat_, config.state_size,
@@ -255,7 +252,13 @@ class TrajModel(object):
       xent__ = logits_p_constrained__ * onehot_targets_  # [batch*t, state_size], sparse
       loss_p_vec_ = -tf.math.log(tf.sparse_reduce_sum(xent__, 1))  # [batch*t]
       masked_loss_p_ = tf.multiply(loss_p_vec_, tf.reshape(self.mask_, [-1]))  # [batch*t]
-      loss_p_ = tf.reduce_sum(masked_loss_p_) / config.batch_size
+      loss_p_ = tf.reduce_sum(masked_loss_p_) / self.config.batch_size
+
+      next_state = tf.sparse.to_dense(tf.sparse.reorder(logits_p_constrained__))
+      max_prediction_label_ = tf.cast(tf.argmax(next_state, dimension=1), config.int_type) # [batch*t]
+      self.pred['sparse'] = tf.reshape(max_prediction_label_, tf.shape(self.targets_))
+
+      self.build_max_predict_loss_layer(max_prediction_label_, targets_p_flat_, False)
 
       return loss_p_
 
@@ -318,15 +321,18 @@ class TrajModel(object):
 
         max_prediction_ = tf.one_hot(tf.argmax(exp_scaled_sub_logits_ * sub_adj_mask_, 1),
                                      int(adj_mat_.get_shape()[1]), dtype=config.float_type)  # [batch*t, max_adj_num]
+        self.pred['adjmat'] = tf.reshape(tf.reduce_sum(tf.multiply(tf.cast(max_prediction_, config.int_type), sub_adj_mat_), axis=1), tf.shape(self.targets_))
+
         return loss_, max_prediction_
 
       wp_t_ = tf.transpose(wp_)  # [state_size, hid_dim]
       loss_p_vec_, max_prediction_ = constrained_softmax_cross_entropy_loss(outputs_flat_, self.inputs_, self.targets_, wp_t_, bp_, self.adj_mat_, self.adj_mask_)  # [batch*t]
 
-      self.build_max_predict_loss_layer(max_prediction_, tf.reshape(self.sub_onehot_targets_, [-1, int(self.sub_onehot_targets_.get_shape()[2])]), use_onehot=True)
-      # self.pred["next_state"] = max_prediction_
       masked_loss_p_ = tf.multiply(loss_p_vec_, tf.reshape(self.mask_, [-1]))  # [batch*t]
-      loss_p_ = tf.reduce_sum(masked_loss_p_) / config.batch_size
+      loss_p_ = tf.reduce_sum(masked_loss_p_) / self.config.batch_size
+
+      self.build_max_predict_loss_layer(max_prediction_, tf.reshape(self.sub_onehot_targets_, [-1, int(self.sub_onehot_targets_.get_shape()[2])]), use_onehot=True)
+
       return loss_p_
 
     # loss p (i.e., the negative log likelihood loss / x-ent loss)
@@ -480,7 +486,7 @@ class TrajModel(object):
       xent_, max_prediction_ = constrained_softmax_cross_entropy_loss_with_individual_weights(self.inputs_, lpi_, self.sub_onehot_targets_, self.mask_, all_w_task_, all_b_task_, self.adj_mask_)
 
       self.build_max_predict_loss_layer(max_prediction_, tf.reshape(self.sub_onehot_targets_, [-1, int(self.sub_onehot_targets_.get_shape()[2])]), use_onehot=True)
-      loss_p_ = tf.reduce_sum(xent_) / config.batch_size
+      loss_p_ = tf.reduce_sum(xent_) / self.config.batch_size
       if config.individual_task_regularizer > 0 and train_phase:
         if config.individual_task_keep_prob < 1.0:
           print("Warning: you'd better only choose one between dropout and L2-regularizer")
@@ -622,7 +628,7 @@ class TrajModel(object):
         batch_mask[row][col] = 1.0
 
     # sub_one_hot_target
-    batch_sub_onehot_target = np.zeros([config.batch_size, max_seq_len, self.adj_mask.shape[1]], dtype=np.float32)  # TODO, implement automatic inference, maybe fixed
+    batch_sub_onehot_target = np.zeros([batch_size, max_seq_len, self.adj_mask.shape[1]], dtype=np.float32)  # TODO, implement automatic inference, maybe fixed
     for x0 in range(batch_sub_onehot_target.shape[0]):
       for x1 in range(batch_sub_onehot_target.shape[1]):
         for x2 in range(batch_sub_onehot_target.shape[2]):
@@ -708,7 +714,7 @@ class TrajModel(object):
         batch_mask[row][col] = 1.0
 
     # sub_one_hot_target
-    batch_sub_onehot_target = np.zeros([config.batch_size, max_seq_len, self.adj_mat.shape[1]],
+    batch_sub_onehot_target = np.zeros([batch_size, max_seq_len, self.adj_mat.shape[1]],
                                        dtype=np.float32)  # TODO, implement automatic inference, maybe done
     for x0 in range(batch_sub_onehot_target.shape[0]):
       for x1 in range(batch_sub_onehot_target.shape[1]):
@@ -729,6 +735,8 @@ class TrajModel(object):
     fetch_dict = {}
     for k in self.loss_dict.keys():
       fetch_dict[k] = self.loss_dict[k]
+    # for k in self.pred.keys():
+    #   fetch_dict[k] = self.pred[k]
     if eval_op is not None:
       fetch_dict["_eval_op"] = eval_op
     for k in self.debug_tensors.keys():
@@ -881,8 +889,9 @@ class TrajModel(object):
     samples_per_sec, ms_per_sample, self.config.batch_size))
     print("benchmark loss = %.5f" % (loss / steps_for_test))
 
-  def predict(self, sess, data):
-    batch = self.get_batch(data, self.config.batch_size, self.config.max_seq_len)
+  def predict(self, sess, bat_data):
+    from_id = 0
+    batch, _ = self.get_batch_for_test(bat_data, len(bat_data), self.config.max_seq_len, from_id)
     feed_dict = self.feed(batch)
     fetch_dict = self.pred
     # run sess

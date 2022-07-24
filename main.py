@@ -1,4 +1,5 @@
 from __future__ import print_function
+import pickle
 import numpy as np
 import math
 import random
@@ -51,9 +52,10 @@ class Config(object):
   workspace = '/data' # the true workspace will actually be workspace + '/' + dataset_name
   file_name = "example.txt"
   train_filename = "example.txt"
+  valid_filename = "example.txt"
   test_filename = "example.txt"
   data_size = -1 # how many trajs you want to read in. `-1` means reading in all trajectories
-  dataset_ratio = [0.8, 0.1, 0.1]
+  dataset_ratio = [0.6, 0.2, 0.2]
   state_size = None # do not set this manually
   EOS_ID = None # do not set this manually
   PAD_ID = 0
@@ -103,7 +105,7 @@ class Config(object):
   build_unconstrained_in_train = False # have effects only when the model_type is `SPECIFIED_CSSRNN`
   use_constrained_softmax_in_test = True # have effects only when the model_type is `SPECIFIED_CSSRNN`
   build_unconstrained_in_test = False # have effects only when the model_type is `SPECIFIED_CSSRNN`
-  constrained_softmax_strategy = 'sparse_tensor' # suggested  # 'sparse_tensor' or 'adjmat_adjmask'
+  constrained_softmax_strategy = 'adjmat_adjmask' # suggested  # 'sparse_tensor' or 'adjmat_adjmask'
 
   input_dest = True # if `True`, append the destination feature on the input feature
   dest_emb = True # if `True`, use the distributed representation to represent the destination states
@@ -117,6 +119,7 @@ class Config(object):
                                   # set this value to the one larger than or equal to 1.0 to avoid using dropout.
 
   # params for training
+  gpu_id = 0
   batch_size = 50  # 100 is faster on simple model but need more memory
   lr = 0.0001
   lr_decay = 0.9 # parameter for RMSProp optimizer
@@ -155,6 +158,7 @@ class Config(object):
     self.workspace = os.path.join(self.workspace, self.dataset_name)
     self.dataset_path = os.path.join(self.workspace, self.file_name)
     self.train_path = os.path.join(self.workspace, self.train_filename)
+    self.valid_path = os.path.join(self.workspace, self.valid_filename)
     self.test_path = os.path.join(self.workspace, self.test_filename)
     self.map_path = os.path.join(self.workspace, "map/")
     self.__set_save_path()
@@ -191,6 +195,7 @@ class Config(object):
               individual_task_keep_prob = self.individual_task_keep_prob))
 
     print("\ntraining params:\n" \
+          "\tgpu_id = {gpu_id}\n" \
           "\tepoch = {epoch_num}\n" \
           "\tbatch = {batch_size}\n" \
           "\tlr = {lr}\n" \
@@ -202,7 +207,7 @@ class Config(object):
           "\tuse_seq_len_in_rnn = {use_seq_len_in_rnn}\n" \
           "\tmax_seq_len = {max_seq_len}\n" \
           "\toptimizer = {opt}" \
-      .format(epoch_num=self.epoch_count, batch_size=self.batch_size, lr=self.lr, lr_decay=self.lr_decay, keep_prob=self.keep_prob,
+      .format(gpu_id=self.gpu_id, epoch_num=self.epoch_count, batch_size=self.batch_size, lr=self.lr, lr_decay=self.lr_decay, keep_prob=self.keep_prob,
               max_grad_norm=self.max_grad_norm, init_scale=self.init_scale,
               fix_seq_len=self.fix_seq_len, max_seq_len=self.max_seq_len,
               use_seq_len_in_rnn=self.use_seq_len_in_rnn, opt=self.opt))
@@ -214,17 +219,13 @@ class Config(object):
     :param routes: the whole dataset, list of lists, each entry is the road id
     :return: Nothing
     """
-    self.data_size = len(routes)
-    max_edge_id = max([max(route) for route in routes])
-    min_edge_id = min([max(route) for route in routes])
-    print("min_edge_id = %d, max_edge_id = %d" % (min_edge_id, max_edge_id))
-    max_route_len = max([len(route) for route in routes])
-    print("max seq_len = %d" % max_route_len)
-    self.EOS_ID = max_edge_id + 1
-    self.state_size = max_edge_id + 2
+    # self.EOS_ID = max_edge_id + 1
+    # self.state_size = max_edge_id + 2
+    self.EOS_ID = len(roadnet.edges)
+    self.state_size = len(roadnet.edges) + 1
 
     if self.samples_per_epoch_in_train < 0:
-      self.samples_per_epoch_in_train = int(self.dataset_ratio[0] * len(routes))
+      self.samples_per_epoch_in_train = int(self.dataset_ratio[0] * self.data_size)
 
     # Note that we should pad target by the adjacent state of state `PAD_ID`.
     # Since if we also pad the target by `PAD_ID`, when computing using constrained softmax,
@@ -234,6 +235,10 @@ class Config(object):
     # Here I use `0` to be the `PAD_ID`, and the road 0 is also a valid road in the road network
     # which means it has an adjacent state (i.e., roadnet.edges[config.PAD_ID].adjList_ids[0]),
     # And since there is no historical trajectory that passes road 0, I decide to leverage it.
+    i = 0
+    while len(roadnet.edges[i].adjList_ids) == 0:
+      i += 1
+    self.PAD_ID = i
     self.TARGET_PAD_ID = roadnet.edges[self.PAD_ID].adjList_ids[0]
 
   def load(self, config_path):
@@ -329,6 +334,7 @@ class Config(object):
     self.individual_task_regularizer = float(self.individual_task_regularizer)
     self.individual_task_keep_prob = float(self.individual_task_keep_prob)
 
+    self.gpu_id = int(self.gpu_id)
     self.batch_size = int(self.batch_size)
     self.lr = float(self.lr)
     self.lr_decay = float(self.lr_decay)
@@ -355,7 +361,7 @@ class MapInfo(object):
   def __init__(self, map, config):
     self.map = map
     self.config = config
-    self.adj_mat, self.adj_mask = self.__get_adjmat_and_mask(config.PAD_ID)
+    self.adj_mat, self.adj_mask = self.__get_adjmat_and_mask(-1)
     self.dest_coord = self.__get_dest_coord()
     return
 
@@ -422,7 +428,7 @@ def read_data(file_path, max_count=-1, max_seq_len = None, ratio=[0.8, 0.1, 0.1]
     if current_count == max_count:
       break
     route_str = line.split(',') # including the last blank substr
-    if len(route_str)-1 > max_seq_len or len(route_str)-1 < 2:
+    if len(route_str)-1 >= max_seq_len or len(route_str)-1 < 2:
       continue
     routes.append([int(route_str[i]) for i in range(len(route_str) - 1)]) # last element is an empty string
     current_count += 1
@@ -434,7 +440,7 @@ def read_data(file_path, max_count=-1, max_seq_len = None, ratio=[0.8, 0.1, 0.1]
   return routes, train, valid, test
 
 
-def read_data2(train_path, test_path, max_count=-1, max_seq_len = None):
+def read_data2(train_path, valid_path, test_path, max_count=-1, max_seq_len = None):
   """
   Read in the route data
   data format: one traj one line with delimiter as ','
@@ -451,9 +457,21 @@ def read_data2(train_path, test_path, max_count=-1, max_seq_len = None):
       if current_count == max_count:
         break
       route_str = line.split(',')
-      if len(route_str) > max_seq_len or len(route_str) < 2:
+      if len(route_str) >= max_seq_len or len(route_str) < 2:
         continue
       train.append([int(route_str[i]) for i in range(len(route_str))])
+      current_count += 1
+
+  valid = []
+  current_count = 0
+  with open(valid_path) as file:
+    for line in file:
+      if current_count == max_count:
+        break
+      route_str = line.split(',')
+      if len(route_str) >= max_seq_len or len(route_str) < 2:
+        continue
+      valid.append([int(route_str[i]) for i in range(len(route_str))])
       current_count += 1
 
   test = []
@@ -463,19 +481,18 @@ def read_data2(train_path, test_path, max_count=-1, max_seq_len = None):
       if current_count == max_count:
         break
       route_str = line.split(',')
-      if len(route_str) > max_seq_len or len(route_str) < 2:
+      if len(route_str) >= max_seq_len or len(route_str) < 2:
         continue
       test.append([int(route_str[i]) for i in range(len(route_str))])
       current_count += 1
 
-  valid = test
   routes = train + valid + test
   return routes, train, valid, test
 
 
 if __name__ == "__main__":
-  # os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
   config = Config("config")
+  os.environ["CUDA_VISIBLE_DEVICES"] = str(config.gpu_id)
   # set log file
   timestr = time.strftime('%Y-%m-%d_%H:%M:%S', time.localtime(time.time())) # use for naming the log file
   if config.direct_stdout_to_file:
@@ -486,15 +503,16 @@ if __name__ == "__main__":
 
   # process data
   # routes, train, valid, test = read_data(config.dataset_path, config.data_size, config.max_seq_len, config.dataset_ratio)
-  routes, train, valid, test = read_data2(config.train_path, config.test_path, config.data_size, config.max_seq_len)
+  routes, train, valid, test = read_data2(config.train_path, config.valid_path, config.test_path, config.data_size, config.max_seq_len)
   print("successfully read %d routes" % sum([len(train), len(valid), len(test)]))
   print("train:%d, valid:%d, test:%d" % (len(train), len(valid), len(test)))
+  config.data_size = len(routes)
   max_edge_id = max([max(route) for route in routes])
   min_edge_id = min([max(route) for route in routes])
   print("min_edge_id = %d, max_edge_id = %d" % (min_edge_id, max_edge_id))
-  # max_route_len = max([len(route) for route in routes])
+  max_route_len = max([len(route) for route in routes])
+  print("max seq_len = %d" % max_route_len)
   # route_lens = [len(route) for route in routes]
-  # print(max(route_lens))
   # plt.hist(route_lens, bins=config.max_seq_len, cumulative=True, normed=True)
   # plt.show()
 
@@ -528,7 +546,7 @@ if __name__ == "__main__":
   roadnet.open(config.map_path)
 
   # set config
-  config.set_config(routes, roadnet)
+  config.set_config(None, roadnet)
   config.printf()
 
   # extract map info
@@ -627,12 +645,11 @@ if __name__ == "__main__":
       # let's go :)
       start_time = time.time()
       valid_losses = {}
-      model_name = 'model.ckpt'
-      ckpt_path = os.path.join(config.save_path, model_name)
+      ckpt_dir = os.path.join(config.workspace, "ckpt")
       updated_epoch = 0
       for ep in range(config.epoch_count):
-        if (ep - updated_epoch) > 10:
-          print("==> [Info] Early Stop in Epoch {}.".format(ep))
+        if (ep - updated_epoch) >= 5:
+          print("==> [Info] Early Stop before Epoch {}.".format(ep))
           break
         print("========= Epoch: {} =========".format(ep))
         if not config.eval_mode:
@@ -644,10 +661,11 @@ if __name__ == "__main__":
             valid_losses[k] = []
           valid_losses[k] += [v]
         if valid_loss[config.loss_for_filename] <= min(valid_losses[config.loss_for_filename]):
-          model.saver.save(sess, ckpt_path)
+          model.saver.save(sess, os.path.join(ckpt_dir, "model.ckpt"))
+          pickle.dump(model.config, open(os.path.join(ckpt_dir, "support.pkl"), "wb"))
           updated_epoch = ep
-          print('==> [Info] The checkpoint file has been updated.')
+          print('==> [Info] The checkpoint file has been updated in epoch {}.'.format(ep))
 
         # model_test.eval(sess, test, False, False, model_train=model)
-      print("[Info] Model Training Finished, Use {:.3f} Seconds".format(time.time() - start_time))
+      print("[Info] Model Training Finished, Use {:.3f} Seconds for {} epochs".format(time.time() - start_time, ep))
       writer.close()
